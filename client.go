@@ -1,11 +1,10 @@
 package pusher
 
 import (
-	"code.google.com/p/go.net/websocket"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"golang.org/x/net/websocket"
 	"time"
 )
 
@@ -13,13 +12,16 @@ type client struct {
 	ws                 *websocket.Conn
 	Events             chan *Event
 	Stop               chan bool
+	ConnError          chan error
+	PusherError        chan *Event
 	subscribedChannels *subscribedChannels
 	binders            map[string]chan *Event
+	running            bool
 }
 
 // heartbeat send a ping frame to server each - TODO reconnect on disconnect
 func (c *client) heartbeat() {
-	for {
+	for c.running {
 		websocket.Message.Send(c.ws, `{"event":"pusher:ping","data":"{}"}`)
 		time.Sleep(HEARTBEAT_RATE * time.Second)
 	}
@@ -31,7 +33,10 @@ func (c *client) listen() {
 		var event Event
 		err := websocket.JSON.Receive(c.ws, &event)
 		if err != nil {
-			log.Println("Listen error : ", err)
+			c.running = false
+			c.ConnError <- err
+			close(c.ConnError)
+			return
 		} else {
 			//log.Println(event)
 			switch event.Event {
@@ -39,7 +44,7 @@ func (c *client) listen() {
 				websocket.Message.Send(c.ws, `{"event":"pusher:pong","data":"{}"}`)
 			case "pusher:pong":
 			case "pusher:error":
-				log.Println("Event error recieved: ", event.Data)
+				c.PusherError <- &event
 			default:
 				_, ok := c.binders[event.Event]
 				if ok {
@@ -129,7 +134,15 @@ func NewCustomClient(appKey, host, scheme string) (*client, error) {
 	case "pusher:connection_established":
 		sChannels := new(subscribedChannels)
 		sChannels.channels = make([]string, 0)
-		pClient := client{ws, make(chan *Event, EVENT_CHANNEL_BUFF_SIZE), make(chan bool), sChannels, make(map[string]chan *Event)}
+		pClient := client{
+			ws:                 ws,
+			Events:             make(chan *Event, EVENT_CHANNEL_BUFF_SIZE),
+			Stop:               make(chan bool),
+			ConnError:          make(chan error),
+			PusherError:        make(chan *Event),
+			subscribedChannels: sChannels,
+			binders:            make(map[string]chan *Event),
+		}
 		go pClient.heartbeat()
 		go pClient.listen()
 		return &pClient, nil
